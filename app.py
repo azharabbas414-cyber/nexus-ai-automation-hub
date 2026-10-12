@@ -7,7 +7,7 @@ import streamlit as st
 from core_tools import load_incidents, retrieve_knowledge, analyze_incident, generate_incident_report
 
 APP_TITLE = "NEXUS AI Automation Hub"
-DEFAULT_MODEL = os.getenv("GROK_MODEL", "grok-4.7")
+DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🧭", layout="wide")
 
@@ -31,16 +31,16 @@ def get_secret(name: str, default: str = "") -> str:
 
 def ask_grok(question: str, context: str, model: str) -> str:
     """Call the xAI API through its OpenAI-compatible Chat Completions endpoint."""
-    api_key = get_secret("GROK_API_KEY")
+    api_key = get_secret("GROQ_API_KEY")
     if not api_key:
         return (
-            "Grok is not configured yet. Add GROK_API_KEY in Streamlit Community Cloud → "
+            "Groq is not configured yet. Add GROQ_API_KEY in Streamlit Community Cloud → "
             "your app → Settings → Secrets, then retry. Your question and retrieved context "
             "are ready; no key is stored in GitHub."
         )
 
     from openai import OpenAI
-    client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1", timeout=45.0)
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1", timeout=45.0)
     system_prompt = (
         "You are NEXUS AI, a careful enterprise analysis assistant. "
         "Use the provided local knowledge and synthetic incident context. "
@@ -92,14 +92,14 @@ def call_n8n_webhook(payload: dict) -> dict:
         return {"ok": False, "message": f"n8n request failed: {exc}"}
 
 st.title("🧭 NEXUS AI Automation Hub")
-st.markdown('<p class="nexus-subtitle">Grok + local RAG + MCP-ready tools + n8n workflow integration</p>', unsafe_allow_html=True)
+st.markdown('<p class="nexus-subtitle">Groq + local RAG + MCP-ready tools + n8n workflow integration</p>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Configuration")
-    model = st.text_input("Grok model", value=get_secret("GROK_MODEL", DEFAULT_MODEL))
-    api_configured = bool(get_secret("GROK_API_KEY"))
+    model = st.text_input("Groq model", value=get_secret("GROQ_MODEL", DEFAULT_MODEL))
+    api_configured = bool(get_secret("GROQ_API_KEY"))
     n8n_configured = bool(get_secret("N8N_WEBHOOK_URL"))
-    st.write("Grok API:", "🟢 Configured" if api_configured else "🟡 Not configured")
+    st.write("Groq API:", "🟢 Configured" if api_configured else "🟡 Not configured")
     st.write("n8n webhook:", "🟢 Configured" if n8n_configured else "⚪ Optional")
     st.caption("API credentials must be added to Streamlit Secrets, never to GitHub.")
     st.caption("This app uses synthetic data and simulated actions only.")
@@ -128,7 +128,7 @@ with tab_chat:
         height=100,
         key="analyst_question",
     )
-    if st.button("Analyze with Grok", type="primary", key="analyze_grok"):
+    if st.button("Analyze with Groq", type="primary", key="analyze_grok"):
         if not question.strip():
             st.warning("Enter a question first.")
         else:
@@ -138,7 +138,7 @@ with tab_chat:
                 f"Document: {d['title']}\n{d['content']}" for d in retrieved
             ) or "No matching local knowledge documents."
             context = f"INCIDENT DATA:\n{incident_context}\n\nKNOWLEDGE:\n{knowledge_context}"
-            with st.spinner("Retrieving context and asking Grok..."):
+            with st.spinner("Retrieving context and asking Groq..."):
                 try:
                     answer = ask_grok(question, context, model.strip() or DEFAULT_MODEL)
                     st.markdown(answer)
@@ -148,8 +148,8 @@ with tab_chat:
                         "retrieved_documents": [d["title"] for d in retrieved],
                     }
                 except Exception as exc:
-                    st.error(f"Grok request failed: {exc}")
-                    st.info("Check that GROK_API_KEY is valid, your model is available to your account, and the key has API credits/permissions.")
+                    st.error(f"Groq request failed: {exc}")
+                    st.info("Check that GROQ_API_KEY is valid, the model ID is available to your Groq account, and your account has API access.")
 
     if st.session_state.get("last_analysis"):
         with st.expander("Show RAG retrieval trace"):
