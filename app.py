@@ -1,16 +1,19 @@
 import os
 import json
+import asyncio
 import requests
 import pandas as pd
 import streamlit as st
 
 from core_tools import load_incidents, retrieve_knowledge, analyze_incident, generate_incident_report
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 APP_TITLE = "NEXUS AI Automation Hub"
 DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+MCP_URL = "https://nexus-ai-mcp.azhar-abbas414.workers.dev/mcp"
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🧭", layout="wide")
-
 st.markdown("""
 <style>
 .block-container {padding-top: 1.4rem; padding-bottom: 2rem;}
@@ -18,6 +21,7 @@ div[data-testid="stMetric"] {border: 1px solid rgba(128,128,128,.25); padding: 1
 .nexus-subtitle {color: #9ca3af; font-size: .92rem;}
 </style>
 """, unsafe_allow_html=True)
+
 
 def get_secret(name: str, default: str = "") -> str:
     """Read a Streamlit secret first, then an environment variable."""
@@ -29,8 +33,9 @@ def get_secret(name: str, default: str = "") -> str:
         pass
     return os.getenv(name, default)
 
+
 def ask_grok(question: str, context: str, model: str) -> str:
-    """Call the xAI API through its OpenAI-compatible Chat Completions endpoint."""
+    """Call Groq through its OpenAI-compatible Chat Completions endpoint."""
     api_key = get_secret("GROQ_API_KEY")
     if not api_key:
         return (
@@ -38,7 +43,6 @@ def ask_grok(question: str, context: str, model: str) -> str:
             "your app → Settings → Secrets, then retry. Your question and retrieved context "
             "are ready; no key is stored in GitHub."
         )
-
     from openai import OpenAI
     client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1", timeout=45.0)
     system_prompt = (
@@ -51,10 +55,8 @@ def ask_grok(question: str, context: str, model: str) -> str:
     )
     user_prompt = f"""Question:
 {question}
-
 Retrieved local knowledge and synthetic incident context:
 {context}
-
 Respond with:
 1. Summary
 2. Evidence from the supplied context
@@ -71,6 +73,7 @@ Respond with:
         temperature=0.2,
     )
     return response.choices[0].message.content or "The model returned an empty response."
+
 
 def call_n8n_webhook(payload: dict) -> dict:
     """Optional outbound call to a user-configured n8n webhook."""
@@ -91,9 +94,58 @@ def call_n8n_webhook(payload: dict) -> dict:
     except requests.RequestException as exc:
         return {"ok": False, "message": f"n8n request failed: {exc}"}
 
+
+async def list_remote_mcp_tools(token: str) -> list[dict]:
+    """List tools exposed by the Cloudflare MCP Worker."""
+    async with streamablehttp_client(
+        MCP_URL,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as (read_stream, write_stream, _session_id):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return [
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": getattr(tool, "inputSchema", {}),
+                }
+                for tool in result.tools
+            ]
+
+
+async def call_remote_mcp_tool(token: str, tool_name: str, arguments: dict) -> dict:
+    """Call a remote MCP tool without exposing the token in the UI."""
+    async with streamablehttp_client(
+        MCP_URL,
+        headers={"Authorization": f"Bearer {token}"},
+    ) as (read_stream, write_stream, _session_id):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments=arguments)
+            output = []
+            for item in result.content:
+                if getattr(item, "type", "") == "text":
+                    try:
+                        output.append(json.loads(item.text))
+                    except (json.JSONDecodeError, TypeError):
+                        output.append(item.text)
+                else:
+                    output.append({"type": getattr(item, "type", "unknown")})
+            return {
+                "tool": tool_name,
+                "is_error": bool(getattr(result, "isError", False)),
+                "content": output,
+            }
+
+
+def run_async(coro):
+    """Run a short MCP operation from Streamlit's synchronous script."""
+    return asyncio.run(coro)
+
+
 st.title("🧭 NEXUS AI Automation Hub")
 st.markdown('<p class="nexus-subtitle">Groq + local RAG + MCP-ready tools + n8n workflow integration</p>', unsafe_allow_html=True)
-
 with st.sidebar:
     st.header("Configuration")
     model = st.text_input("Groq model", value=get_secret("GROQ_MODEL", DEFAULT_MODEL))
@@ -106,7 +158,6 @@ with st.sidebar:
 
 incidents = load_incidents()
 documents = retrieve_knowledge("network cybersecurity business data incident", top_k=3)
-
 open_count = int((incidents["status"].str.lower() != "closed").sum()) if not incidents.empty else 0
 high_count = int(incidents["priority"].str.lower().isin(["high", "critical"]).sum()) if not incidents.empty else 0
 c1, c2, c3, c4 = st.columns(4)
@@ -115,13 +166,13 @@ c2.metric("Open incidents", open_count)
 c3.metric("High / critical", high_count)
 c4.metric("Knowledge documents", len(documents))
 
-tab_chat, tab_incidents, tab_tools, tab_workflow = st.tabs(
-    ["💬 AI Analyst", "📋 Incident Register", "🧰 Tool Playground", "🔄 n8n Workflow"]
+tab_chat, tab_incidents, tab_tools, tab_workflow, tab_remote_mcp = st.tabs(
+    ["💬 AI Analyst", "📋 Incident Register", "🧰 Tool Playground", "🔄 n8n Workflow", "🔌 Remote MCP"]
 )
 
 with tab_chat:
     st.subheader("Ask NEXUS AI")
-    st.write("Ask a question about the sample incidents or the local runbooks. The app retrieves relevant text and passes it to Grok.")
+    st.write("Ask a question about the sample incidents or the local runbooks. The app retrieves relevant text and passes it to Groq.")
     question = st.text_area(
         "Your question",
         placeholder="Example: Investigate the simulated BGP peer flapping incident. What should we check first?",
@@ -150,7 +201,6 @@ with tab_chat:
                 except Exception as exc:
                     st.error(f"Groq request failed: {exc}")
                     st.info("Check that GROQ_API_KEY is valid, the model ID is available to your Groq account, and your account has API access.")
-
     if st.session_state.get("last_analysis"):
         with st.expander("Show RAG retrieval trace"):
             st.json(st.session_state["last_analysis"]["retrieved_documents"])
@@ -211,6 +261,76 @@ with tab_workflow:
         else:
             st.warning(result.get("message", "Webhook not configured or request failed."))
         st.json(result)
+
+with tab_remote_mcp:
+    st.subheader("Cloudflare Remote MCP Connection")
+    st.write("Connect to the separately deployed NEXUS AI MCP Worker. This uses synthetic demo data only; it does not contact live routers or production systems.")
+    st.caption(f"Endpoint: {MCP_URL}")
+    mcp_token = get_secret("MCP_API_TOKEN")
+    if not mcp_token:
+        st.warning("MCP_API_TOKEN is not configured in Streamlit Secrets yet.")
+        st.write("Open Streamlit Community Cloud → your app → Settings → Secrets, and add the same token you configured in Cloudflare. Never put the token in GitHub.")
+    else:
+        if st.button("Connect and list remote tools", type="primary", key="connect_remote_mcp"):
+            try:
+                with st.spinner("Connecting to Cloudflare MCP..."):
+                    remote_tools = run_async(list_remote_mcp_tools(mcp_token))
+                st.session_state["remote_mcp_tools"] = remote_tools
+                st.session_state["remote_mcp_connected"] = True
+                st.success(f"Connected successfully. Found {len(remote_tools)} tools.")
+            except Exception as exc:
+                st.session_state["remote_mcp_connected"] = False
+                st.error("Connection failed. Confirm the Cloudflare and Streamlit MCP_API_TOKEN values match and the latest Worker deployment is active.")
+                st.caption(f"Technical detail: {type(exc).__name__}: {str(exc)[:400]}")
+
+        remote_tools = st.session_state.get("remote_mcp_tools", [])
+        if remote_tools:
+            st.dataframe(
+                [{"Tool": tool["name"], "Description": tool["description"]} for tool in remote_tools],
+                use_container_width=True,
+                hide_index=True,
+            )
+            remote_tool_names = [tool["name"] for tool in remote_tools]
+            remote_tool = st.selectbox("Choose remote MCP tool", remote_tool_names, key="remote_mcp_tool")
+            remote_args = {}
+
+            if remote_tool == "list_incidents":
+                st.write("Optional filters. Leave blank or choose Any to include all incidents.")
+                a, b = st.columns(2)
+                with a:
+                    remote_category = st.text_input("Category filter", key="remote_category", placeholder="e.g. Telecom")
+                    remote_priority = st.selectbox("Priority filter", ["Any", "Critical", "High", "Medium", "Low"], key="remote_priority")
+                with b:
+                    remote_status = st.selectbox("Status filter", ["Any", "Open", "Investigating", "Closed"], key="remote_status")
+                    remote_region = st.text_input("Region filter", key="remote_region", placeholder="e.g. North")
+                if remote_category.strip():
+                    remote_args["category"] = remote_category.strip()
+                if remote_priority != "Any":
+                    remote_args["priority"] = remote_priority
+                if remote_status != "Any":
+                    remote_args["status"] = remote_status
+                if remote_region.strip():
+                    remote_args["region"] = remote_region.strip()
+            elif remote_tool in ("analyze_incident", "generate_incident_report"):
+                remote_args["incident_id"] = st.text_input("Incident ID", value="NX-1002", key="remote_incident_id").strip()
+            elif remote_tool == "search_knowledge":
+                remote_args["query"] = st.text_input("Knowledge query", value="BGP", key="remote_knowledge_query")
+                remote_args["top_k"] = st.selectbox("Maximum documents", [1, 2, 3], index=2, key="remote_knowledge_top_k")
+            else:
+                st.warning("This tool is not yet wired to a dedicated input form.")
+                st.json(next((tool["input_schema"] for tool in remote_tools if tool["name"] == remote_tool), {}))
+
+            if st.button("Run remote MCP tool", type="primary", key="run_remote_mcp"):
+                try:
+                    with st.spinner(f"Running {remote_tool}..."):
+                        remote_result = run_async(call_remote_mcp_tool(mcp_token, remote_tool, remote_args))
+                    if remote_result["is_error"]:
+                        st.warning("The remote MCP tool returned an error.")
+                    st.subheader("Remote MCP result")
+                    st.json(remote_result)
+                except Exception as exc:
+                    st.error("The remote MCP tool call failed. Check the Worker deployment and matching secrets.")
+                    st.caption(f"Technical detail: {type(exc).__name__}: {str(exc)[:400]}")
 
 st.divider()
 st.caption("NEXUS AI Automation Hub · Synthetic training data only · No production systems or live network devices are contacted.")
