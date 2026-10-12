@@ -1,0 +1,7 @@
+incident_id,category,title,priority,status,region,affected_service,description
+NX-1001,Cybersecurity,Suspicious login from unusual location,High,Open,North,Identity Demo,Simulated sign-in alert for training only
+NX-1002,Telecom,BGP peer session flapping,Critical,Investigating,Central,IP Core Demo,Synthetic BGP event; no real router was queried
+NX-1003,Business,Unexpected billing variance,Medium,Open,South,Billing Demo,Synthetic variance in a sample billing dataset
+NX-1004,Cybersecurity,Potential phishing email reported,Medium,Closed,North,Email Demo,Training example; no email system was accessed
+NX-1005,Telecom,Elevated simulated packet loss,High,Open,East,Transport Demo,Generated sample event for dashboard testing
+NX-1006,Business,Missing region values in report,Low,Closed,Central,Analytics Demo,Synthetic data-quality issue for demonstration
