@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: nexus-ai-mcp
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-mcp.txt
+    startCommand: python mcp_server.py
+    healthCheckPath: /health
+    envVars:
+      - key: MCP_API_TOKEN
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.12.8

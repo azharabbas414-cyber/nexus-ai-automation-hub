@@ -1,0 +1,5 @@
+# MCP service dependencies. Keep this separate from Streamlit's requirements.
+mcp[cli]>=1.20,<2.0
+pandas>=2.2,<3.0
+scikit-learn>=1.5,<2.0
+starlette>=0.40,<1.0
