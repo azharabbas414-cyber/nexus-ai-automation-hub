@@ -1,18 +1,20 @@
-"""NEXUS AI Automation Hub — remote MCP server.
+"""NEXUS AI Automation Hub — authenticated remote MCP server.
 
-Exposes safe tools over Streamable HTTP. All operations use synthetic local data.
+All tools use local synthetic data and deterministic project logic.
 No live routers, production accounts, or external business systems are accessed.
 
-Hosting note:
-- Deploy this as a separate Python web service, not as part of Streamlit Community Cloud.
-- Configure MCP_API_TOKEN in the hosting provider's environment/secrets.
-- The token check protects tool calls with a simple Bearer token at the HTTP layer.
+Set MCP_API_TOKEN as a secret in the hosting provider. Every HTTP route except
+/health requires Authorization: Bearer <MCP_API_TOKEN>. The /health endpoint is
+public only so Render can check service health; it exposes no sensitive data.
 """
 
 import hmac
 import os
+from typing import Any
+
+import uvicorn
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from mcp.server.fastmcp import FastMCP
 from core_tools import (
@@ -26,6 +28,58 @@ SERVER_NAME = "NEXUS AI Automation Hub MCP"
 API_TOKEN = os.getenv("MCP_API_TOKEN", "").strip()
 
 mcp = FastMCP(SERVER_NAME)
+
+
+class BearerTokenMiddleware:
+    """Require a configured bearer token on all HTTP paths except /health."""
+
+    def __init__(self, app: Any, token: str) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        # Pass lifespan events through unchanged so the MCP SDK can start/stop
+        # its session manager correctly.
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path == "/health":
+            await self.app(scope, receive, send)
+            return
+
+        # Fail closed if the secret has not been configured in Render.
+        if not self.token:
+            response = JSONResponse(
+                {
+                    "error": "server_misconfigured",
+                    "message": "MCP_API_TOKEN is not configured.",
+                },
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
+
+        headers = {
+            key.lower(): value
+            for key, value in scope.get("headers", [])
+        }
+        authorization = headers.get(b"authorization", b"").decode(
+            "latin-1", errors="ignore"
+        )
+        expected = f"Bearer {self.token}"
+
+        if not hmac.compare_digest(authorization, expected):
+            response = JSONResponse(
+                {"error": "unauthorized", "message": "Valid bearer token required."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
 @mcp.tool()
@@ -66,30 +120,21 @@ def create_simulated_incident_report(incident_id: str) -> str:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    """Simple health endpoint for hosting-provider health checks."""
-    return JSONResponse({
-        "status": "ok",
-        "service": "nexus-mcp",
-        "mode": "synthetic-data-only",
-    })
+    """Public health endpoint for Render; it reveals no secrets or dataset contents."""
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "nexus-mcp",
+            "mode": "synthetic-data-only",
+        }
+    )
 
 
-@mcp.custom_route("/authorize", methods=["GET"])
-async def authorization_check(request: Request) -> JSONResponse:
-    """Safe diagnostic endpoint to check whether a bearer token was supplied."""
-    if not API_TOKEN:
-        return JSONResponse(
-            {"status": "not_configured", "message": "MCP_API_TOKEN is not set."},
-            status_code=503,
-        )
-    supplied = request.headers.get("authorization", "")
-    expected = f"Bearer {API_TOKEN}"
-    if not hmac.compare_digest(supplied, expected):
-        return JSONResponse({"status": "unauthorized"}, status_code=401)
-    return JSONResponse({"status": "authorized"})
+# The middleware wraps the complete MCP HTTP application, so /mcp requests
+# are authenticated before the SDK parses or dispatches any tool call.
+app = BearerTokenMiddleware(mcp.streamable_http_app(), API_TOKEN)
 
 
 if __name__ == "__main__":
-    # MCP endpoint defaults to /mcp with the Streamable HTTP transport.
-    # The host platform should provide HTTPS at the public edge.
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
